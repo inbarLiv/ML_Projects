@@ -13,7 +13,6 @@ from itertools import accumulate
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.feature_selection import f_classif, mutual_info_classif, f_regression,\
     VarianceThreshold, SelectKBest, chi2, SelectFromModel
-from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut, train_test_split, ParameterGrid
 from sklearn.preprocessing import LabelEncoder
@@ -28,6 +27,7 @@ from sklearn.metrics import auc, plot_roc_curve, accuracy_score, \
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+
 
 def imbalaced_ratio(n_samples, n_classes, n_samples_class_i) -> float:
     """
@@ -121,7 +121,7 @@ def selected_features(df_select_rank: pd.DataFrame, top_univariate: int = 50) ->
 
 
 def select_rank(
-        fs_ls: list, min_to_select: int = 10, weighing: bool = False) -> pd.DataFrame:
+        fs_ls: list, min_to_select: int = 10, weighting: bool = False) -> pd.DataFrame:
     """
     create a data-frame with indices, names and relative importance that represents the relation
     strength to the target and combining the corresponding feature importance, selection indicator, and rank
@@ -135,7 +135,7 @@ def select_rank(
     df_select_rank = df.drop(['score'], axis=1)
     df_select_rank['sum_ind'] = 0
     df_select_rank['sum_rank'] = 0
-    if weighing:
+    if weighting:
         weight = 1 / len(fs_ls)
     else:
         weight = 1
@@ -177,7 +177,7 @@ def select_rank(
 
 def sequential_forward_selection(
         df_data_train: pd.DataFrame, features_names: pd.DataFrame, df_target_train: pd.DataFrame, clf_ls: list,
-        k_feature_range: tuple) -> list:
+        k_feature_range: tuple, seed: int) -> list:
     """
     create a data-frame with feature indices, names and relative importance that represents the multi-variate relation
     strength to the target according to sequential feature selection (SFS) methods.
@@ -257,15 +257,16 @@ def sequential_forward_selection(
             ls.append([*diff, ])
         merged = list(itertools.chain.from_iterable(ls))
         return merged
-
+    # define a cv object to pass a random state to SFS
+    cv = StratifiedKFold(n_splits=2, random_state=seed, shuffle=True)
     for clf in clf_ls:
         ls: list = []
         sfs = SFS(clf,
                   k_features=k_feature_range,
                   forward=True,
                   floating=False,
-                  verbose=2,
-                  cv=0)
+                  verbose=0,
+                  cv=cv)
         sfs_fit = sfs.fit(df_data_train, df_target_train)
         ls.append(sfs_fit.k_feature_idx_)
         ls.append(sfs_fit.k_feature_names_)
@@ -275,6 +276,7 @@ def sequential_forward_selection(
         list_ls.append(ls)
     list_ls.append(create_select_indicator(df_data_train, list_ls))
     return list_ls
+
 
 def remove_correlation_redundancy(df_data_train: pd.DataFrame, threshold: int = 0.75) -> list:
     """
@@ -339,14 +341,14 @@ def tree_tune_pruning(
     """
 
     # split the data into folds_num stratified folds
-    skf = StratifiedKFold(n_splits=folds_num, random_state=0)
+    skf = StratifiedKFold(n_splits=folds_num)  # , random_state=0
     data_array: np.ndarray = df_data.to_numpy()
     target_array: np.ndarray = df_target.to_numpy()
     # define a decision tree classifier
     clf = DecisionTreeClassifier(random_state=0, criterion='entropy')
     # define an empty list that would facilitate the feature score and ranking per test fold
     ls_fold: list = []
-    df_score_rank_fold = pd.DataFrame()
+
     # loop over the folds to train a decision tree and compute cost-complexity parameters
     # test each parameter on test, use the best score to get that tree feature importance
     # then use algorithm to indicate relevant features and their rank
@@ -379,14 +381,15 @@ def tree_tune_pruning(
         clf_fit = clf.fit(data_array_train, target_array_train)
         feature_importance = clf_fit.feature_importances_
 
-        df_score_rank_fold['feature_num'] = features_indices
-        df_score_rank_fold['feature'] = features_names
-        df_score_rank_fold['score'] = feature_importance
+        df_score_rank_fold = pd.DataFrame.from_dict(
+            {'feature_num': features_indices,
+             'feature': features_names,
+             'score': feature_importance})
+
         ls_fold.append(df_score_rank_fold)
     weighing = True
     df_score_rank = select_rank(ls_fold, min_to_select, weighing)
     return df_score_rank
-
 
 def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
         is_test: bool, test_percentage: float, is_loo: bool,
@@ -417,7 +420,7 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
             k: int = int(k - k * test_percentage)
         if not os.path.exists(is_test_dir):
             os.makedirs(is_test_dir)
-        testper_dir: str = os.path.join(is_test_dir, str(test_percentage) + 'per_test_set')
+        testper_dir: str = os.path.join(is_test_dir, str(test_percentage) + 'per_test')
         if not os.path.exists(testper_dir):
             os.makedirs(testper_dir)
         train_dir: str = os.path.join(testper_dir, 'train_set', str(k) + 'folds' + '_balance_' + str(is_balance))
@@ -440,6 +443,7 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
         seed: int = random.randint(1, 4000)
         joblib.dump(seed, os.path.join(train_dir, 'seed'))
         random.seed(seed)
+        np.random.seed(seed)
         print(seed)
 
     # split data into input and output elements
@@ -454,11 +458,11 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
     joblib.dump(headers, os.path.join(train_dir, 'headers'))
     if is_test and len(os.listdir(test_dir)) == 0:
         # split to train test sets
-        X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=test_percentage,
-                                                            stratify=y, random_state=42)
-        df_data_test = pd.DataFrame(X_test)
+        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_percentage,
+                                                                  stratify=y, random_state=seed)
+        df_data_test = pd.DataFrame(x_test)
         df_target_test = pd.DataFrame(y_test)
-        df_data_train = pd.DataFrame(X_train)
+        df_data_train = pd.DataFrame(x_train)
         df_target_train = pd.DataFrame(y_train)
         joblib.dump(
             df_data_test, os.path.join(testper_dir, 'test_set', 'df_data_test'))
@@ -476,42 +480,37 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
     elif not is_test and len(os.listdir(train_dir)) < k + 5:
         # k+5 ---> there should be k folders (one for each fold)
         # and 5 more files (fs_config_dir, df_data, df_target, headers, seed)
-        df_data_train = pd.DataFrame(x)
-        df_target_train = pd.DataFrame(y)
+        df_data_train = df_data
+        df_target_train = df_target
         joblib.dump(
             df_data_train, os.path.join(train_dir, 'df_data_train'))
         joblib.dump(
             df_target_train, os.path.join(train_dir, 'df_target_train'))
     if len(os.listdir(train_dir)) < k + 5:
         # split to k folds cv or leave one oue
-        df_data: pd.DataFrame = df_data_train
-        df_target: pd.DataFrame = df_target_train
         if is_loo:
             cv_split = LeaveOneOut()
-            cv_split.get_n_splits(df_data_train)
+            cv_split.get_n_splits(df_data)
         else:
-            cv_split = StratifiedKFold(n_splits=k, random_state=1495)
+            cv_split = StratifiedKFold(n_splits=k, random_state=seed)
 
-        for fold_num, (train_index, test_index) in enumerate(cv_split.split(df_data, df_target)):
-            df_data_train: pd.DataFrame = df_data.loc[train_index, :]
-            df_target_train: pd.DataFrame = df_target.loc[train_index]
-            df_data_test: pd.DataFrame = df_data.loc[test_index, :]
-            df_target_test: pd.DataFrame = df_target.loc[test_index]
+        for fold_num, (train_fold_index, test_fold_index) in enumerate(cv_split.split(df_data, df_target)):
+            df_data_fold_train: pd.DataFrame = df_data.loc[train_fold_index, :]
+            df_target_fold_train: pd.DataFrame = df_target.loc[train_fold_index]
+            df_data_fold_test: pd.DataFrame = df_data.loc[test_fold_index, :]
+            df_target_fold_test: pd.DataFrame = df_target.loc[test_fold_index]
             # balance the train data
-            # label encode the target variable
-            x = df_data_train
-            y = LabelEncoder().fit_transform(np.ravel(df_target_train))
             # summarize distribution
             print('imbalanced data: fold=%d' % fold_num)
-            counter = Counter(y)
+            counter = Counter(np.ravel(df_target_fold_train))
             for u, v in counter.items():
-                per = v / len(y) * 100
+                per = v / len(np.ravel(df_target_fold_train)) * 100
                 print('Class=%d, n=%d (%.3f%%)' % (u, v, per))
             # # plot the distribution
             # # plt.bar(counter.keys(), counter.values())
             # # plt.show()
             if is_balance:
-                n_samples: int = len(y)
+                n_samples: int = len(np.ravel(df_target_fold_train))
                 n_classes: int = len(counter.items())
                 if np.argmax([list(counter.items())[0][1], list(counter.items())[1][1]], axis=0):
                     undersample_group: tuple = list(counter.items())[1]
@@ -521,57 +520,60 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
                     oversample_group: tuple = list(counter.items())[1]
 
                 # # balance dataset
-                undersample_indx = np.random.choice(np.argwhere(y == undersample_group[0])[:, 0],
-                                                    int(undersample_group[1] *
-                                                        imbalaced_ratio(n_samples, n_classes, undersample_group[1])),
+                undersample_indx = np.random.choice(np.argwhere(np.ravel(df_target_fold_train) ==
+                                                                undersample_group[0])[:, 0],
+                                                    int(undersample_group[1] * imbalaced_ratio(n_samples, n_classes,
+                                                                                               undersample_group[1])),
                                                     replace=False)
-                oversample_indx = np.random.choice(np.argwhere(y == oversample_group[0])[:, 0],
+                oversample_indx = np.random.choice(np.argwhere(np.ravel(df_target_fold_train) == oversample_group[0])[:, 0],
                                                    int(oversample_group[1] *
                                                        imbalaced_ratio(n_samples, n_classes, oversample_group[1])))
 
-                df_target_train_balanced = y[undersample_indx]
-                df_target_train_balanced = pd.DataFrame(np.append(df_target_train_balanced, y[oversample_indx]))
-                df_data_train_balanced = x.iloc[undersample_indx, :]
-                df_data_train_balanced = pd.DataFrame(np.append(df_data_train_balanced,
-                                                                x.iloc[oversample_indx, :], axis=0))
+                df_target_train_fold_balanced = df_target_fold_train.iloc[undersample_indx]
+                df_target_train_fold_balanced = pd.DataFrame(np.append(df_target_train_fold_balanced,
+                                                                       df_target_fold_train.iloc[oversample_indx]))
+                df_data_train_fold_balanced = df_data_fold_train.iloc[undersample_indx, :]
+                df_data_train_fold_balanced = pd.DataFrame(np.append(df_data_train_fold_balanced,
+                                                                     df_data_fold_train.iloc[oversample_indx, :], axis=0))
                 # summarize new distribution
-                counter = Counter(np.ravel(df_target_train_balanced))
+                counter = Counter(np.ravel(df_target_train_fold_balanced))
                 print('balanced data: fold=%d' % fold_num)
                 for u, v in counter.items():
-                    per = v / len(df_target_train_balanced) * 100
+                    per = v / len(df_target_train_fold_balanced) * 100
                     print('Class=%d, n=%d (%.3f%%)' % (u, v, per))
                 # plot the distribution
                 # plt.bar(counter.keys(), counter.values())
                 # plt.show()
             else:
-                df_target_train_balanced = pd.DataFrame(y)
-                df_data_train_balanced = pd.DataFrame(x)
+                df_target_train_fold_balanced = df_target_fold_train
+                df_data_train_fold_balanced = df_data_fold_train
 
             if not os.path.exists(os.path.join(train_dir, 'fold_' + str(fold_num))):
                 os.makedirs(os.path.join(train_dir, 'fold_' + str(fold_num)))
             joblib.dump(
-                train_index, os.path.join(train_dir, 'fold_' + str(fold_num),
+                train_fold_index, os.path.join(train_dir, 'fold_' + str(fold_num),
                                           'train_index'))
             joblib.dump(
-                df_data_train_balanced, os.path.join(train_dir, 'fold_' + str(fold_num),
+                df_data_train_fold_balanced, os.path.join(train_dir, 'fold_' + str(fold_num),
                                                      'df_data_train'))
             joblib.dump(
-                df_target_train_balanced, os.path.join(train_dir, 'fold_' + str(fold_num),
+                df_target_train_fold_balanced, os.path.join(train_dir, 'fold_' + str(fold_num),
                                                        'df_target_train'))
             joblib.dump(
-                test_index, os.path.join(train_dir, 'fold_' + str(fold_num),
+                test_fold_index, os.path.join(train_dir, 'fold_' + str(fold_num),
                                          'test_index'))
             joblib.dump(
-                df_data_test, os.path.join(train_dir, 'fold_' + str(fold_num),
+                df_data_fold_test, os.path.join(train_dir, 'fold_' + str(fold_num),
                                            'df_data_test'))
             joblib.dump(
-                df_target_test, os.path.join(train_dir, 'fold_' + str(fold_num),
+                df_target_fold_test, os.path.join(train_dir, 'fold_' + str(fold_num),
                                              'df_target_test'))
     pass
     return train_dir, testper_dir, test_dir, k
 
 
-def cfg_fs(train_dir: str, min_to_select: int, top_univariate: int,top_multivariate: int,folds_num_tree: int ) -> str:
+def cfg_fs(train_dir: str, min_to_select: int, top_univariate: int,top_multivariate: int,
+           folds_num_tree: int) -> str:
     """
     create directory with current feature selection configuration
     :param train_dir: directory where train data is saved
@@ -585,8 +587,7 @@ def cfg_fs(train_dir: str, min_to_select: int, top_univariate: int,top_multivari
     # select minimum features in each uni-variate analysis
     # feature selection configuration
     config_fs_dir = os.path.join(train_dir, 'fs_congif_' + 'top' + str(top_univariate) + 'univar' +
-                                 '_' + 'top' + str(top_multivariate) + 'multivar' +
-                                 '_' + str(folds_num_tree) + 'foldsnum')
+                                 '_' + 'top' + str(top_multivariate) + 'multivar')
     # create current feature selection configuration folder
     if not os.path.exists(config_fs_dir):
         os.makedirs(config_fs_dir)
@@ -596,7 +597,7 @@ def cfg_fs(train_dir: str, min_to_select: int, top_univariate: int,top_multivari
     return config_fs_dir
 
 
-def feature_selection(train_dir: str, config_fs_dir: str, k: int):
+def feature_selection(train_dir: str, testper_dir:str, config_fs_dir: str, k: int):
     """
     runs uni and multi variate feature selection methods. saves for each fold the top discriminating features
     according to top_univariate and top_multivariate parameters
@@ -612,142 +613,96 @@ def feature_selection(train_dir: str, config_fs_dir: str, k: int):
     top_univariate: int = fs_dict_param['top_univariate']
     folds_num_tree: int = fs_dict_param['folds_num_tree']
     top_multivariate: int = fs_dict_param['top_multivariate']
-    if len(os.listdir(config_fs_dir)) < k+1:
-        # loop over k-folds
-        for fold_num in range(k):
-            print(str(fold_num))
-            # create configuration folder for each fold
-            config_dir_fold: str = os.path.join(config_fs_dir, 'fold_' + str(fold_num))
-            if not os.path.exists(config_dir_fold):
-                os.makedirs(config_dir_fold)
-            # read train/test datasets
-            df_data_train: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                   'fold_' + str(fold_num), 'df_data_train'))
-            df_target_train: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                     'fold_' + str(fold_num), 'df_target_train'))
-            df_data_test: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                  'fold_' + str(fold_num), 'df_data_test'))
-            df_target_test: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                    'fold_' + str(fold_num), 'df_target_test'))
+    #set seed
+    seed: int = joblib.load(os.path.join(train_dir, 'seed'))
+    random.seed(seed)
+    np.random.seed(seed)
 
-            # remove low variance features
-            df_data_train_select, mask_array = remove_no_variance_features(df_data_train)
-            data_header: pd.DataFrame = original_data_header[mask_array]
-            df_data_train: pd.DataFrame = df_data_train.iloc[:, mask_array]
+    def selection_process(df_data_train: pd.DataFrame, df_target_train: pd.DataFrame,
+                          df_data_test: pd.DataFrame, original_data_header: pd.Index, save_dir: str):
+        # remove low variance features
+        df_data_train_select, mask_array = remove_no_variance_features(df_data_train)
+        data_header: pd.DataFrame = original_data_header[mask_array]
+        df_data_train: pd.DataFrame = df_data_train.iloc[:, mask_array]
+        if not df_data_test.empty:
             df_data_test: pd.DataFrame = df_data_test.iloc[:, mask_array]
-            # test univariate relations
-            df_fclassif: pd.DataFrame = uni_feature_selection(mask_array, data_header,
-                                                              df_data_train, df_target_train, f_classif)
-            df_mutual: pd.DataFrame = uni_feature_selection(mask_array, data_header,
-                                                            df_data_train, df_target_train, mutual_info_classif)
-            # df_freg: pd.DataFrame = uni_feature_selection(mask_array, data_header, df_data_train,
-            #                                               df_target_train, f_regression)
-            df_fclassif.to_csv(os.path.join(config_dir_fold, 'df_fclassif.csv'))
-            df_mutual.to_csv(os.path.join(config_dir_fold, 'df_mutual.csv'))
-            # df_freg.to_csv(os.path.join(config_dir_fold, 'df_freg.csv'))
+        # test univariate relations
+        df_fclassif: pd.DataFrame = uni_feature_selection(mask_array, data_header,
+                                                          df_data_train, df_target_train, f_classif)
+        df_mutual: pd.DataFrame = uni_feature_selection(mask_array, data_header,
+                                                        df_data_train, df_target_train, mutual_info_classif)
+        df_fclassif.to_csv(os.path.join(save_dir, 'df_fclassif.csv'))
+        df_mutual.to_csv(os.path.join(save_dir, 'df_mutual.csv'))
 
-            # select top features from univariate feature selection
-            ufs_ls = []
-            ufs_ls.append(df_fclassif)
-            ufs_ls.append(df_mutual)
-            # ufs_ls.append(df_freg)
-            df_select_rank = select_rank(ufs_ls, min_to_select)
-            df_select_univariate = selected_features(df_select_rank, top_univariate)
-            uni_mask: np.ndarray = df_select_univariate['feature_num'].to_numpy()
-            df_train = df_data_train[uni_mask]
-            df_test = df_data_test[uni_mask]
-            data_header = original_data_header[uni_mask]
+        # select top features from univariate feature selection
+        ufs_ls = []
+        ufs_ls.append(df_fclassif)
+        ufs_ls.append(df_mutual)
+        # ufs_ls.append(df_freg)
+        df_select_rank = select_rank(ufs_ls, min_to_select)
+        df_select_univariate = selected_features(df_select_rank, top_univariate)
+        uni_mask: np.ndarray = df_select_univariate['feature_num'].to_numpy()
+        df_data_train = df_data_train[uni_mask]
+        if not df_data_test.empty:
+            df_data_test = df_data_test[uni_mask]
+        data_header = original_data_header[uni_mask]
 
-            # examine multivariate relations
-            # decision tree based method
-            df_select_rank_tree: pd.DataFrame = tree_tune_pruning(uni_mask, data_header, df_train,
-                                                                  df_target_train, folds_num_tree, min_to_select)
-            df_select_rank_tree = df_select_rank_tree.rename(columns=
-                                                             {'sum_ind': 'sum_ind_tree', 'sum_rank': 'sum_rank_tree'})
-            df_select_rank_tree.to_csv(os.path.join(config_dir_fold, 'tree.csv'))
+        # examine multivariate relations
+        # decision tree based method
+        df_select_rank_tree: pd.DataFrame = tree_tune_pruning(uni_mask, data_header, df_data_train,
+                                                              df_target_train, folds_num_tree, min_to_select)
+        df_select_rank_tree = df_select_rank_tree.rename(columns=
+                                                         {'sum_ind': 'sum_ind_tree', 'sum_rank': 'sum_rank_tree'})
+        df_select_rank_tree.to_csv(os.path.join(save_dir, 'tree.csv'))
 
-            # execute several SFS corresponding to the given classifiers
-            means_train, stds_train, df_train_scaled = scale_data(df_train)
-            sfs_clf_ls = []
-            svm_linear = SVC(C=1.0, kernel='linear', random_state=0)
-            gnb = GaussianNB()
-            lr = LogisticRegression(random_state=0)
-            sfs_clf_ls.append(svm_linear)
-            sfs_clf_ls.append(gnb)
-            sfs_clf_ls.append(lr)
-            sfs_ls: list = sequential_forward_selection(df_train_scaled, data_header, df_target_train,
-                                                        sfs_clf_ls, 'parsimonious')
-            df_sfs = pd.merge(sfs_ls[-1][0], sfs_ls[-1][1], how='left', on='feature_num')
-            df_sfs.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
-            df_sfs.to_csv(os.path.join(config_dir_fold, 'fs.csv'))
-            columns = ['feature_num', 'feature_x', 'sum_ind', 'sum_rank']
-            df_sfs = df_sfs[columns]
-            df_sfs = df_sfs.rename(columns={'feature_x': 'feature'})
-            df_sfs = df_sfs.rename(columns={'sum_ind': 'sum_ind_sfs'})
-            df_sfs = df_sfs.rename(columns={'sum_rank': 'sum_rank_sfs'})
+        # execute several SFS corresponding to the given classifiers
+        means_train, stds_train, df_train_scaled = scale_data(df_data_train)
+        sfs_clf_ls = []
+        svm_linear = SVC(C=1.0, kernel='linear', random_state=0)
+        gnb = GaussianNB()
+        lr = LogisticRegression(random_state=0)
+        sfs_clf_ls.append(svm_linear)
+        sfs_clf_ls.append(gnb)
+        sfs_clf_ls.append(lr)
+        sfs_ls: list = sequential_forward_selection(df_train_scaled, data_header, df_target_train,
+                                                    sfs_clf_ls, 'parsimonious', seed)
+        df_sfs = pd.merge(sfs_ls[-1][0], sfs_ls[-1][1], how='left', on='feature_num')
+        df_sfs.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
+        df_sfs.to_csv(os.path.join(save_dir, 'fs.csv'))
+        columns = ['feature_num', 'feature_x', 'sum_ind', 'sum_rank']
+        df_sfs = df_sfs[columns]
+        df_sfs = df_sfs.rename(columns={'feature_x': 'feature'})
+        df_sfs = df_sfs.rename(columns={'sum_ind': 'sum_ind_sfs'})
+        df_sfs = df_sfs.rename(columns={'sum_rank': 'sum_rank_sfs'})
 
-            # combine multivariate feature selection
-            df_select_rank_tree.sort_values(by=['feature_num'], ascending=[True], inplace=True)
-            df_sfs.sort_values(by=['feature_num'], ascending=[True], inplace=True)
-            dfs = [df_select_rank_tree, df_sfs]
-            cols = ['feature_num', 'feature']
-            df_multi: pd.DataFrame = pd.concat([d.set_index(cols) for d in dfs], axis=1).reset_index()
-            df_multi['sum_ind'] = df_multi['sum_ind_tree'] + df_multi['sum_ind_sfs']
-            df_multi['sum_rank'] = df_multi['sum_rank_tree'] + df_multi['sum_rank_sfs']
-            df_multi.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
+        # combine multivariate feature selection
+        df_select_rank_tree.sort_values(by=['feature_num'], ascending=[True], inplace=True)
+        df_sfs.sort_values(by=['feature_num'], ascending=[True], inplace=True)
+        dfs = [df_select_rank_tree, df_sfs]
+        cols = ['feature_num', 'feature']
+        df_multi: pd.DataFrame = pd.concat([d.set_index(cols) for d in dfs], axis=1).reset_index()
+        df_multi['sum_ind'] = df_multi['sum_ind_tree'] + df_multi['sum_ind_sfs']
+        df_multi['sum_rank'] = df_multi['sum_rank_tree'] + df_multi['sum_rank_sfs']
+        df_multi.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
 
-            df_select_multi: pd.DataFrame = selected_features(df_multi, top_multivariate)
-            df_select_multi.to_csv(os.path.join(config_dir_fold, 'multivar_selection.csv'))
+        df_select_multi: pd.DataFrame = selected_features(df_multi, top_multivariate)
+        df_select_multi.to_csv(os.path.join(save_dir, 'multivar_selection.csv'))
 
-            # selecting top features from multivariate methods
-            multi_mask: np.ndarray = df_select_multi['feature_num'].to_numpy()
-            # normalizing test by train mean and std
-            df_train_scaled: pd.DataFrame = df_train_scaled[multi_mask]
-            df_test_scaled: pd.DataFrame = (df_test - means_train) / stds_train
-            df_test_scaled: pd.DataFrame = df_test_scaled[multi_mask]
-            df_train: pd.DataFrame = df_train[multi_mask]
-            df_test: pd.DataFrame = df_test[multi_mask]
-            features_names = original_data_header[multi_mask]
+        # selecting top features from multivariate methods
+        multi_mask: np.ndarray = df_select_multi['feature_num'].to_numpy()
+        # normalizing test by train mean and std
+        df_data_train_scaled_selected: pd.DataFrame = df_train_scaled[multi_mask]
+        df_data_train_selected: pd.DataFrame = df_data_train[multi_mask]
+        if not df_data_test.empty:
+            df_data_test_scaled: pd.DataFrame = (df_data_test - means_train) / stds_train
+            df_data_test_scaled: pd.DataFrame = df_data_test_scaled[multi_mask]
+            df_data_test: pd.DataFrame = df_data_test[multi_mask]
+        else:
+            df_data_test_scaled = pd.DataFrame()
+        features_names = original_data_header[multi_mask]
+        return df_data_train_selected, df_data_test,  df_data_train_scaled_selected, \
+               df_data_test_scaled, features_names
 
-            joblib.dump(
-                df_train, os.path.join(config_dir_fold,
-                                       'df_data_train_selected'))
-            joblib.dump(
-                df_target_train, os.path.join(config_dir_fold,
-                                              'df_target_train_selected'))
-            joblib.dump(
-                df_test, os.path.join(config_dir_fold,
-                                      'df_data_test_selected'))
-            joblib.dump(
-                df_target_test, os.path.join(config_dir_fold,
-                                             'df_target_test'))
-            joblib.dump(
-                features_names, os.path.join(config_dir_fold,
-                                             'selected_features_names'))
-            joblib.dump(
-                df_train_scaled, os.path.join(config_dir_fold,
-                                       'df_train_scaled_selected'))
-            joblib.dump(
-                df_test_scaled, os.path.join(config_dir_fold,
-                                      'df_test_scaled_selected'))
-
-
-def lasso_feature_selection(train_dir: str, config_fs_dir: str, k: int):
-    """
-    runs uni and multi variate feature selection methods. saves for each fold the top discriminating features
-    according to top_univariate and top_multivariate parameters
-    :param train_dir: directory where train data is saved
-    :param config_fs_dir: directory where feature selection configuration is saved
-    :param k: number of CV folds
-    """
-    # read original data features names
-    original_data_header: pd.Index = joblib.load(os.path.join(train_dir, 'headers'))
-    # read feature selection parameters dictionary
-    fs_dict_param: int = joblib.load(os.path.join(config_fs_dir, 'fs_dict_param'))
-    min_to_select: int = fs_dict_param['min_vars_to_select']
-    top_univariate: int = fs_dict_param['top_univariate']
-    folds_num_tree: int = fs_dict_param['folds_num_tree']
-    top_multivariate: int = fs_dict_param['top_multivariate']
     if len(os.listdir(config_fs_dir)) < k+1:
         # loop over k-folds
         for fold_num in range(k):
@@ -766,163 +721,70 @@ def lasso_feature_selection(train_dir: str, config_fs_dir: str, k: int):
             df_target_test: pd.DataFrame = joblib.load(os.path.join(train_dir,
                                                                     'fold_' + str(fold_num), 'df_target_test'))
 
-            # remove low variance features
-            df_data_train_select, mask_array = remove_no_variance_features(df_data_train)
-            data_header: pd.DataFrame = original_data_header[mask_array]
-            df_data_train: pd.DataFrame = df_data_train.iloc[:, mask_array]
-            df_data_test: pd.DataFrame = df_data_test.iloc[:, mask_array]
-            # test univariate relations
-            df_fclassif: pd.DataFrame = uni_feature_selection(mask_array, data_header,
-                                                              df_data_train, df_target_train, f_classif)
-            df_mutual: pd.DataFrame = uni_feature_selection(mask_array,data_header,
-                                                            df_data_train, df_target_train, mutual_info_classif)
-            df_freg: pd.DataFrame = uni_feature_selection(mask_array, data_header, df_data_train,
-                                                          df_target_train, f_regression)
-            df_fclassif.to_csv(os.path.join(config_dir_fold, 'df_fclassif.csv'))
-            df_mutual.to_csv(os.path.join(config_dir_fold, 'df_mutual.csv'))
-            df_freg.to_csv(os.path.join(config_dir_fold, 'df_freg.csv'))
-
-            # select top features from univariate feature selection
-            ufs_ls = []
-            ufs_ls.append(df_fclassif)
-            ufs_ls.append(df_mutual)
-            ufs_ls.append(df_freg)
-            df_select_rank = select_rank(ufs_ls, min_to_select)
-            df_select_univariate = selected_features(df_select_rank, top_univariate)
-            uni_mask: np.ndarray = df_select_univariate['feature_num'].to_numpy()
-            df_train = df_data_train[uni_mask]
-            df_test = df_data_test[uni_mask]
-            data_header = original_data_header[uni_mask]
-
-            # examine multivariate relations
-            # decision tree based method
-            df_select_rank_tree: pd.DataFrame = tree_tune_pruning(uni_mask, data_header, df_train,
-                                                                  df_target_train, folds_num_tree, min_to_select)
-            df_select_rank_tree = df_select_rank_tree.rename(columns=
-                                                             {'sum_ind': 'sum_ind_tree', 'sum_rank': 'sum_rank_tree'})
-            df_select_rank_tree.to_csv(os.path.join(config_dir_fold, 'tree.csv'))
-
-            # execute several SFS corresponding to the given classifiers
-            means_train, stds_train, df_train_scaled = scale_data(df_train)
-            sfs_clf_ls = []
-            svm_linear = SVC(C=1.0, kernel='linear', random_state=0)
-            gnb = GaussianNB()
-            lr = LogisticRegression(random_state=0)
-            sfs_clf_ls.append(svm_linear)
-            sfs_clf_ls.append(gnb)
-            sfs_clf_ls.append(lr)
-            sfs_ls: list = sequential_forward_selection(df_train_scaled, data_header, df_target_train,
-                                                        sfs_clf_ls, 'parsimonious')
-            df_sfs = pd.merge(sfs_ls[-1][0], sfs_ls[-1][1], how='left', on='feature_num')
-            df_sfs.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
-            df_sfs.to_csv(os.path.join(config_dir_fold, 'fs.csv'))
-            columns = ['feature_num', 'feature_x', 'sum_ind', 'sum_rank']
-            df_sfs = df_sfs[columns]
-            df_sfs = df_sfs.rename(columns={'feature_x': 'feature'})
-            df_sfs = df_sfs.rename(columns={'sum_ind': 'sum_ind_sfs'})
-            df_sfs = df_sfs.rename(columns={'sum_rank': 'sum_rank_sfs'})
-
-            # combine multivariate feature selection
-            df_select_rank_tree.sort_values(by=['feature_num'], ascending=[True], inplace=True)
-            df_sfs.sort_values(by=['feature_num'], ascending=[True], inplace=True)
-            dfs = [df_select_rank_tree, df_sfs]
-            cols = ['feature_num', 'feature']
-            df_multi: pd.DataFrame = pd.concat([d.set_index(cols) for d in dfs], axis=1).reset_index()
-            df_multi['sum_ind'] = df_multi['sum_ind_tree'] + df_multi['sum_ind_sfs']
-            df_multi['sum_rank'] = df_multi['sum_rank_tree'] + df_multi['sum_rank_sfs']
-            df_multi.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
-
-            df_select_multi: pd.DataFrame = selected_features(df_multi, top_multivariate)
-            df_select_multi.to_csv(os.path.join(config_dir_fold, 'multivar_selection.csv'))
-
-            # selecting top features from multivariate methods
-            multi_mask: np.ndarray = df_select_multi['feature_num'].to_numpy()
-            # normalizing test by train mean and std
-            df_train_scaled: pd.DataFrame = df_train_scaled[multi_mask]
-            df_test_scaled: pd.DataFrame = (df_test - means_train) / stds_train
-            df_test_scaled: pd.DataFrame = df_test_scaled[multi_mask]
-            df_train: pd.DataFrame = df_train[multi_mask]
-            df_test: pd.DataFrame = df_test[multi_mask]
-            features_names = original_data_header[multi_mask]
+            df_data_train_selected, df_data_test_selected, df_train_scaled_selected, \
+                df_test_scaled_selected, selected_features_names = selection_process(df_data_train, df_target_train,
+                                                                                     df_data_test, original_data_header
+                                                                                     , config_dir_fold)
 
             joblib.dump(
-                df_train, os.path.join(config_dir_fold,
+                df_data_train_selected, os.path.join(config_dir_fold,
                                        'df_data_train_selected'))
             joblib.dump(
                 df_target_train, os.path.join(config_dir_fold,
                                               'df_target_train_selected'))
             joblib.dump(
-                df_test, os.path.join(config_dir_fold,
+                df_data_test_selected, os.path.join(config_dir_fold,
                                       'df_data_test_selected'))
             joblib.dump(
                 df_target_test, os.path.join(config_dir_fold,
                                              'df_target_test'))
             joblib.dump(
-                features_names, os.path.join(config_dir_fold,
+                selected_features_names, os.path.join(config_dir_fold,
                                              'selected_features_names'))
             joblib.dump(
-                df_train_scaled, os.path.join(config_dir_fold,
+                df_train_scaled_selected, os.path.join(config_dir_fold,
                                        'df_train_scaled_selected'))
             joblib.dump(
-                df_test_scaled, os.path.join(config_dir_fold,
+                df_test_scaled_selected, os.path.join(config_dir_fold,
                                       'df_test_scaled_selected'))
-    # read original data features names
-    original_data_header: pd.Index = joblib.load(os.path.join(train_dir, 'headers'))
-    if len(os.listdir(config_fs_dir)) < k+1:
-        # loop over k-folds
-        for fold_num in range(k):
-            print(str(fold_num))
-            # create configuration folder for each fold
-            config_dir_fold: str = os.path.join(config_fs_dir, 'fold_' + str(fold_num))
-            if not os.path.exists(config_dir_fold):
-                os.makedirs(config_dir_fold)
-            # read train/test datasets
-            df_data_train: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                   'fold_' + str(fold_num), 'df_data_train'))
-            df_target_train: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                     'fold_' + str(fold_num), 'df_target_train'))
-            df_data_test: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                  'fold_' + str(fold_num), 'df_data_test'))
-            df_target_test: pd.DataFrame = joblib.load(os.path.join(train_dir,
-                                                                    'fold_' + str(fold_num), 'df_target_test'))
-            # Selecting features using Lasso regularisation
-            means_train, stds_train, df_train_scaled = scale_data(df_data_train)
-            sel_ = SelectFromModel(LogisticRegression(C=1, penalty='l1', solver='liblinear'))
-            sel_.fit(df_train_scaled, df_target_train)
-            sel_.get_support()
-            selected_feat = df_train_scaled.columns[(sel_.get_support())]
-            print('total features: {}'.format((df_train_scaled.shape[1])))
-            print('selected features: {}'.format(len(selected_feat)))
-            print('features with coefficients shrank to zero: {}'.format(
-                np.sum(sel_.estimator_.coef_ == 0)))
-            df_train_scaled = df_train_scaled.iloc[selected_feat]
-            df_test_scaled: pd.DataFrame = (df_data_test - means_train) / stds_train
-            df_test_scaled: pd.DataFrame = df_test_scaled[selected_feat]
-            df_train: pd.DataFrame = df_data_train.iloc[selected_feat]
-            df_test: pd.DataFrame = df_data_test[selected_feat]
-            features_names = original_data_header[selected_feat]
 
+    # run feature selection process on the full training set (for modeling stage)
+    # read train/test datasets
+    if not os.path.exists(os.path.join(config_fs_dir, 'selected_features_names')):
+        df_data_train: pd.DataFrame = joblib.load(os.path.join(train_dir, 'df_data'))
+        df_target_train: pd.DataFrame = joblib.load(os.path.join(train_dir, 'df_target'))
+        if testper_dir != '':
+            df_data_test: pd.DataFrame = joblib.load(os.path.join(testper_dir, 'test_set', 'df_data_test'))
+            df_target_test: pd.DataFrame = joblib.load(os.path.join(testper_dir, 'test_set', 'df_target_test'))
+        else:
+            df_data_test = pd.DataFrame()
+        # run feature selection process
+        df_data_train_selected, df_data_test_selected, df_train_scaled_selected, df_test_scaled_selected, \
+        features_names = selection_process(df_data_train, df_target_train, df_data_test,
+                                           original_data_header, config_fs_dir)
+        # save feature selection results
+        joblib.dump(
+            df_data_train_selected, os.path.join(config_fs_dir,
+                                   'df_data_train_selected'))
+        joblib.dump(
+            df_target_train, os.path.join(config_fs_dir,
+                                          'df_target_train'))
+        if not df_data_test.empty:
             joblib.dump(
-                df_train, os.path.join(config_dir_fold,
-                                       'df_data_train_selected'))
-            joblib.dump(
-                df_target_train, os.path.join(config_dir_fold,
-                                              'df_target_train_selected'))
-            joblib.dump(
-                df_test, os.path.join(config_dir_fold,
+                df_data_test_selected, os.path.join(config_fs_dir,
                                       'df_data_test_selected'))
             joblib.dump(
-                df_target_test, os.path.join(config_dir_fold,
+                df_target_test, os.path.join(config_fs_dir,
                                              'df_target_test'))
             joblib.dump(
-                features_names, os.path.join(config_dir_fold,
-                                             'selected_features_names'))
-            joblib.dump(
-                df_train_scaled, os.path.join(config_dir_fold,
-                                       'df_train_scaled_selected'))
-            joblib.dump(
-                df_test_scaled, os.path.join(config_dir_fold,
-                                      'df_test_scaled_selected'))
+                df_test_scaled_selected, os.path.join(config_fs_dir,
+                                                      'df_test_scaled_selected'))
+        joblib.dump(
+            features_names, os.path.join(config_fs_dir,
+                                         'selected_features_names'))
+        joblib.dump(
+            df_train_scaled_selected, os.path.join(config_fs_dir,
+                                          'df_train_scaled_selected'))
 
 
 def cfg_model(train_dir: str, config_fs_dir: str) -> str:
@@ -937,36 +799,36 @@ def cfg_model(train_dir: str, config_fs_dir: str) -> str:
     seed: int = joblib.load(os.path.join(train_dir, 'seed'))
     models = [
         'XGB',
-        'GBC',
         'RFC',
         'SVC',
-        'logisticRegression'
+        # 'GBC',
+        # 'logisticRegression'
     ]
     clfs = [
         XGBClassifier(objective='binary:logistic', random_state=seed),
-        GradientBoostingClassifier(random_state=seed),
         RandomForestClassifier(random_state=seed),
         SVC(random_state=seed, probability=True),
-        LogisticRegression(penalty='elasticnet', solver='saga', random_state=seed)
+        # GradientBoostingClassifier(random_state=seed),
+        # LogisticRegression(penalty='elasticnet', solver='saga', random_state=seed)
     ]
     params = {
             models[0]: {'learning_rate': (0.01, 0.1, 0.3),
-                        'n_estimators': (800, 1000), 'max_depth': (3, 5, 8),
+                        'n_estimators': (10, 100, 500, 1000), 'max_depth': (1, 3, 5),
                         'subsample': (0.5, 0.8), 'colsample_bytree': (0.5, 0.8), 'min_child_weight': (0, 1)},
-            models[1]: {'loss': ('deviance', 'exponential'), 'learning_rate': (0.01, 0.1, 0.3),
-                        'n_estimators': (800, 1000), 'max_depth': (3, 5, 8),
-                        'subsample': (0.5, 0.8)},
-            models[2]: {'criterion': ('gini', 'entropy'), 'n_estimators': (800, 1000), 'max_depth': (3, 5, 8)},
-            models[3]: {'kernel': ('linear', 'poly', 'rbf', 'sigmoid'), 'C': (0.1, 1, 10),
-                        'gamma': (1, 0.1, 0.01, 0.001)},
-            models[4]: {'l1_ratio': (0.1, 0.5, 0.8, 1)}
+            models[1]: {'criterion': ('gini', 'entropy'), 'n_estimators': (10, 100, 500, 1000),
+                        'max_depth': (1, 3, 5)},
+            models[2]: {'kernel': ('rbf', 'linear'), 'C': (0.1, 1), 'gamma': (0.01, 0.1)},
+            # models[3]: {'loss': ('deviance', 'exponential'), 'learning_rate': (0.01, 0.1, 0.3),
+            #             'n_estimators': (800, 1000), 'max_depth': (3, 5, 8),
+            #             'subsample': (0.5, 0.8)},
+            # models[4]: {'l1_ratio': (0.1, 0.5, 0.8, 1)}
          }
     is_scale_data = {
         models[0]: False,
         models[1]: False,
-        models[2]: False,
-        models[3]: True,
-        models[4]: True,
+        models[2]: True,
+        # models[3]: False,
+        # models[4]: True,
     }
     models_config_dir = os.path.join(config_fs_dir, 'models_config_' +
                                      datetime.now().strftime("%m-%d-%Y-%H-%M-%S"))
@@ -998,7 +860,19 @@ def modeling(train_dir: str, config_fs_dir: str, models_config_dir:str, k: int, 
     clfs = joblib.load(os.path.join(models_config_dir, 'clfs'))
     params = joblib.load(os.path.join(models_config_dir, 'params'))
     is_scale_data = joblib.load(os.path.join(models_config_dir, 'is_scale_data'))
-
+    #set seed
+    seed: int = joblib.load(os.path.join(train_dir, 'seed'))
+    random.seed(seed)
+    np.random.seed(seed)
+    # load train and test data for final model
+    features_names = joblib.load(os.path.join(config_fs_dir, 'selected_features_names'))
+    df_train_selected_features = joblib.load(os.path.join(config_fs_dir, 'df_data_train_selected'))
+    df_train_scaled_selected = joblib.load(os.path.join(config_fs_dir, 'df_train_scaled_selected'))
+    df_target_train = joblib.load(os.path.join(config_fs_dir, 'df_target_train'))
+    if is_test:
+        df_test_selected_features = joblib.load(os.path.join(config_fs_dir, 'df_data_test_selected'))
+        df_test_scaled_selected = joblib.load(os.path.join(config_fs_dir, 'df_test_scaled_selected'))
+        df_target_test = joblib.load(os.path.join(config_fs_dir, 'df_target_test'))
     # loop over all classifiers
     for name, estimator in zip(models, clfs):
         # read original data features names
@@ -1141,100 +1015,8 @@ def modeling(train_dir: str, config_fs_dir: str, models_config_dir:str, k: int, 
             ind += 1
             plt.close('all')
 
-        """create and save final model using all train set and test it with test set with best hyperparams
+        """create and save final model using all train set and test it with best hyperparams
         """
-        # read feature selection parameters dictionary
-        fs_dict_param: int = joblib.load(os.path.join(config_fs_dir, 'fs_dict_param'))
-        min_to_select: int = fs_dict_param['min_vars_to_select']
-        top_univariate: int = fs_dict_param['top_univariate']
-        folds_num_tree: int = fs_dict_param['folds_num_tree']
-        top_multivariate: int = fs_dict_param['top_multivariate']
-        # is_test = True
-        if is_test:
-            df_data_train: pd.DataFrame = joblib.load(os.path.join(testper_dir, 'train_set', 'df_data_train'))
-            df_target_train: pd.DataFrame = joblib.load(os.path.join(testper_dir, 'train_set', 'df_target_train'))
-            df_data_test: pd.DataFrame = joblib.load(os.path.join(test_dir, 'df_data_test'))
-            df_target_test: pd.DataFrame = joblib.load(os.path.join(test_dir, 'df_target_test'))
-        else:
-            df_data_train: pd.DataFrame = joblib.load(os.path.join(train_dir, 'df_data'))
-            df_target_train: pd.DataFrame = joblib.load(os.path.join(train_dir, 'df_target'))
-        original_data_header = joblib.load(os.path.join(train_dir, 'headers'))
-        # feature selection
-        df_data_train_select, mask_array = remove_no_variance_features(df_data_train)
-        data_header: pd.DataFrame = original_data_header[mask_array]
-        df_data_train: pd.DataFrame = df_data_train.iloc[:, mask_array]
-        if is_test:
-            df_data_test: pd.DataFrame = df_data_test.iloc[:, mask_array]
-        # test univariate relations
-        df_fclassif: pd.DataFrame = uni_feature_selection(mask_array,
-                                                         data_header, df_data_train, df_target_train, f_classif)
-        df_mutual: pd.DataFrame = uni_feature_selection(mask_array,
-                                                       data_header, df_data_train, df_target_train, mutual_info_classif)
-        df_freg: pd.DataFrame = uni_feature_selection(masgk_array,
-                                                     data_header, df_data_train, df_target_train, f_regression)
-        df_fclassif.to_csv(os.path.join(classifier_dir, 'df_fclassif.csv'))
-        df_mutual.to_csv(os.path.join(classifier_dir, 'df_mutual.csv'))
-        df_freg.to_csv(os.path.join(classifier_dir, 'df_freg.csv'))
-        # select top features from univariate feature selection
-        ufs_ls = []
-        ufs_ls.append(df_fclassif)
-        ufs_ls.append(df_mutual)
-        ufs_ls.append(df_freg)
-        df_select_rank = select_rank(ufs_ls, min_to_select)
-        df_select_univariate = selected_features(df_select_rank, top_univariate)
-        uni_mask: np.ndarray = df_select_univariate['feature_num'].to_numpy()
-        df_data_train = df_data_train[uni_mask]
-        if is_test:
-            df_data_test = df_data_test[uni_mask]
-        data_header = original_data_header[uni_mask]
-        # examine multivariate relations
-        # decision tree based method
-        df_select_rank_tree: pd.DataFrame = tree_tune_pruning(uni_mask, data_header, df_data_train,
-                                                              df_target_train, folds_num_tree, min_to_select)
-        df_select_rank_tree = df_select_rank_tree.rename(columns=
-                                                         {'sum_ind': 'sum_ind_tree', 'sum_rank': 'sum_rank_tree'})
-        df_select_rank_tree.to_csv(os.path.join(classifier_dir, 'tree.csv'))
-        # execute several SFS corresponding to the given classifiers
-        means_train, stds_train, df_train_scaled = scale_data(df_data_train)
-        sfs_clf_ls = []
-        svm_linear = SVC(C=1.0, kernel='linear', random_state=0)
-        gnb = GaussianNB()
-        lr = LogisticRegression(random_state=0)
-        sfs_clf_ls.append(svm_linear)
-        sfs_clf_ls.append(gnb)
-        sfs_clf_ls.append(lr)
-        sfs_ls: list = sequential_forward_selection(df_train_scaled, data_header, df_target_train,
-                                                    sfs_clf_ls, 'parsimonious')
-        df_sfs = pd.merge(sfs_ls[-1][0], sfs_ls[-1][1], how='left', on='feature_num')
-        df_sfs.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
-        df_sfs.to_csv(os.path.join(classifier_dir, 'fs.csv'))
-        columns = ['feature_num', 'feature_x', 'sum_ind', 'sum_rank']
-        df_sfs = df_sfs[columns]
-        df_sfs = df_sfs.rename(columns={'feature_x': 'feature'})
-        df_sfs = df_sfs.rename(columns={'sum_ind': 'sum_ind_sfs'})
-        df_sfs = df_sfs.rename(columns={'sum_rank': 'sum_rank_sfs'})
-        # combine multivariate feature selection
-        df_select_rank_tree.sort_values(by=['feature_num'], ascending=[True], inplace=True)
-        df_sfs.sort_values(by=['feature_num'], ascending=[True], inplace=True)
-        dfs = [df_select_rank_tree, df_sfs]
-        cols = ['feature_num', 'feature']
-        df_multi: pd.DataFrame = pd.concat([d.set_index(cols) for d in dfs], axis=1).reset_index()
-        df_multi['sum_ind'] = df_multi['sum_ind_tree'] + df_multi['sum_ind_sfs']
-        df_multi['sum_rank'] = df_multi['sum_rank_tree'] + df_multi['sum_rank_sfs']
-        df_multi.sort_values(by=['sum_ind', 'sum_rank'], ascending=[False, True], inplace=True)
-        df_select_multi: pd.DataFrame = selected_features(df_multi, top_multivariate)
-        df_select_multi.to_csv(os.path.join(classifier_dir, 'multivar_selection.csv'))
-        # selecting top features from multivariate methods
-        multi_mask: np.ndarray = df_select_multi['feature_num'].to_numpy()
-        df_train_selected_features: pd.DataFrame = df_data_train[multi_mask]
-        if is_test:
-            df_test_selected_features: pd.DataFrame = df_data_test[multi_mask]
-        if is_scale_data[name]:
-            df_train_selected_features: pd.DataFrame = df_train_scaled[multi_mask]
-            if is_test:
-                df_test_selected: pd.DataFrame = (df_data_test - means_train) / stds_train
-                df_test_selected_features: pd.DataFrame = df_test_selected[multi_mask]
-        features_names = original_data_header[multi_mask]
         # fit classifier with all the train data with the best hyper params
         # the best params that maximize the weighted sum of AUC and maximize (1-gap) between train ant test accuracy
         weighted_average_grid = 0.5 * np.array(list(grid_auc.values())) + 0.5 * np.array(list(grid_gap.values()))
@@ -1249,6 +1031,9 @@ def modeling(train_dir: str, config_fs_dir: str, models_config_dir:str, k: int, 
         print('the best hyper-parameters are:')
         print(clf_params)
         clf.set_params(**clf_params)
+        # for linear classifiers scale the data before
+        if is_scale_data[name]:
+            df_train_selected_features: pd.DataFrame = df_train_scaled_selected
         clf.fit(df_train_selected_features, np.ravel(df_target_train))
         df_features_importance: pd.DataFrame = pd.DataFrame()
         df_features_importance['feature']: pd.DataFrame = features_names
@@ -1263,10 +1048,24 @@ def modeling(train_dir: str, config_fs_dir: str, models_config_dir:str, k: int, 
             df.plot.barh(x='feature', y='importance', figsize=(30, 18), fontsize=14)
             df.to_csv(os.path.join(classifier_dir, 'features_importance.csv'))
             plt.savefig(os.path.join(classifier_dir, 'features_importance.png'))
+            plt.close()
+        else:
+            result = permutation_importance(clf, df_train_selected_features, np.ravel(df_target_train), n_repeats=10,
+                                            random_state=42, n_jobs=-1)
+            sorted_idx = result.importances_mean.argsort()
+            fig, ax = plt.subplots()
+            ax.boxplot(result.importances[sorted_idx].T,
+                       vert=False, labels=df_train_selected_features.columns[sorted_idx])
+            ax.set_title("Permutation Importance")
+            fig.tight_layout()
+            plt.savefig(os.path.join(classifier_dir, 'features_importance.png'))
+            plt.close()
         joblib.dump(clf, os.path.join(classifier_dir, 'final_model'))
         plt.close()
         # test model performance using test_set
         if is_test:
+            if is_scale_data[name]:
+                df_test_selected_features: pd.DataFrame = df_test_scaled_selected
             y_pred = clf.predict(df_test_selected_features)
             acc_score = accuracy_score(np.ravel(df_target_test), y_pred)
             print(acc_score)
@@ -1291,12 +1090,13 @@ def modeling(train_dir: str, config_fs_dir: str, models_config_dir:str, k: int, 
                         vmax=0.8)
             plt.savefig(os.path.join(classifier_dir, 'report.png'))
 
+
 # data directory
-data_dir: str = r'O:\Inbar\Beat ML\BeatReports\PPMI_format\processed_data'
+data_dir: str = r'O:\Inbar\Beat ML\Opals\LR\LR80_Thresh_median_imputation\processed_data'
 file_name: str = 'LRunder20_LRabove80_matched.xlsx'
 sheet_name: str = 'Sheet1'
 # directory to save processed data and splits k-folds
-datasets_dir: str = r'O:\Inbar\Beat ML\BeatReports\PPMI_format\Datasets\LRunder20_LRabove80_matched'
+datasets_dir: str = r'O:\Inbar\Beat ML\Opals\LR\LR80_Thresh_median_imputation\Datasets\LRunder20_LRabove80_matched'
 # read data as pd.DataFrame
 df_beat_gait: pd.DataFrame = pd.read_excel(
     os.path.join(data_dir, file_name), sheet_name=sheet_name)
@@ -1304,7 +1104,7 @@ gait_data: pd.DataFrame = df_beat_gait.values
 headers: pd.Index = df_beat_gait.columns[:-1]
 # validation set is/no and percentage
 is_test: bool = True
-test_percentage: float = 0.3
+test_percentage: float = 0.2
 # CV number of folds/leave one out
 is_loo: bool = False
 # number of folds if not loo
@@ -1325,9 +1125,7 @@ if __name__ == '__main__':
     train_dir, testper_dir, test_dir, k = etl(gait_data, headers, datasets_dir, is_test,
                               test_percentage, is_loo, k, is_balance)
     config_fs_dir: str = cfg_fs(train_dir, min_to_select, top_univariate, top_multivariate, folds_num_tree)
-    # lasso_feature_selection(train_dir, config_fs_dir, k)
-    feature_selection(train_dir, config_fs_dir, k)
+    feature_selection(train_dir, testper_dir, config_fs_dir, k)
     models_config_dir: str = cfg_model(train_dir, config_fs_dir)
     modeling(train_dir, config_fs_dir, models_config_dir, k, is_loo,
              is_test, testper_dir, test_dir)
-
