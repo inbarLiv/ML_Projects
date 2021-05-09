@@ -420,7 +420,7 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
         testper_dir: str = os.path.join(is_test_dir, str(test_percentage) + 'per_test_set')
         if not os.path.exists(testper_dir):
             os.makedirs(testper_dir)
-        train_dir: str = os.path.join(testper_dir, 'train_set', str(k) + 'folds')
+        train_dir: str = os.path.join(testper_dir, 'train_set', str(k) + 'folds' + '_balance_' + str(is_balance))
         if not os.path.exists(train_dir):
             os.makedirs(train_dir)
         test_dir: str = os.path.join(testper_dir, 'test_set')
@@ -430,7 +430,7 @@ def etl(gait_data: pd.DataFrame, headers: pd.Index, datasets_dir: str,
         is_test_dir: str = os.path.join(datasets_dir, 'is_test_' + str(is_test))
         if not os.path.exists(is_test_dir):
             os.makedirs(is_test_dir)
-        train_dir: str = os.path.join(is_test_dir, str(k) + 'folds')
+        train_dir: str = os.path.join(is_test_dir, str(k) + 'folds' + '_balance_' + str(is_balance))
         if not os.path.exists(train_dir):
             os.makedirs(train_dir)
         testper_dir: str =''
